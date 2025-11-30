@@ -198,6 +198,93 @@ class TestModelWrapping(unittest.TestCase):
         for hook_name in expected_hooks:
             self.assertIn(hook_name, hook_points)
 
+    def test_wrap_model_with_attention_norms(self):
+        """Ensure wrapping works when attention uses per-head norms (e.g., Qwen3)."""
+
+        class NormedAttention(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.n_heads = 2
+                self.n_kv_heads = 2
+                self.scale = 0.125
+                self.q_proj = nn.Linear(64, 64, bias=False)
+                self.k_proj = nn.Linear(64, 64, bias=False)
+                self.v_proj = nn.Linear(64, 64, bias=False)
+                self.o_proj = nn.Linear(64, 64, bias=False)
+                self.rope = nn.RoPE(32, traditional=False)
+                self.q_norm = nn.RMSNorm(32)
+                self.k_norm = nn.RMSNorm(32)
+
+            def __call__(self, x, mask=None, cache=None):
+                B, L, _ = x.shape
+                q = self.q_proj(x)
+                k = self.k_proj(x)
+                v = self.v_proj(x)
+
+                q = self.q_norm(q.reshape(B, L, self.n_heads, -1)).transpose(0, 2, 1, 3)
+                k = self.k_norm(k.reshape(B, L, self.n_kv_heads, -1)).transpose(
+                    0, 2, 1, 3
+                )
+                v = v.reshape(B, L, self.n_kv_heads, -1).transpose(0, 2, 1, 3)
+
+                q = self.rope(q)
+                k = self.rope(k)
+
+                output = mx.fast.scaled_dot_product_attention(
+                    q, k, v, scale=self.scale, mask=mask
+                )
+                output = output.transpose(0, 2, 1, 3).reshape(B, L, -1)
+                return self.o_proj(output)
+
+        class NormedMLP(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.gate_proj = nn.Linear(64, 128, bias=False)
+                self.up_proj = nn.Linear(64, 128, bias=False)
+                self.down_proj = nn.Linear(128, 64, bias=False)
+
+            def __call__(self, x):
+                return self.down_proj(nn.silu(self.gate_proj(x)) * self.up_proj(x))
+
+        class NormedBlock(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.self_attn = NormedAttention()
+                self.mlp = NormedMLP()
+                self.input_layernorm = nn.RMSNorm(64)
+                self.post_attention_layernorm = nn.RMSNorm(64)
+
+            def __call__(self, x, mask=None, cache=None):
+                h = self.self_attn(self.input_layernorm(x), mask, cache) + x
+                return self.mlp(self.post_attention_layernorm(h)) + h
+
+        class NormedCore(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.layers = [NormedBlock()]
+
+        class NormedModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.model = NormedCore()
+
+            def __call__(self, x, cache=None):
+                for layer in self.model.layers:
+                    x = layer(x, cache=cache)
+                return x
+
+        mx.random.seed(0)
+        reference_model = NormedModel()
+        mx.random.seed(0)
+        model_to_wrap = NormedModel()
+        inputs = mx.random.normal((1, 4, 64))
+
+        expected = reference_model(inputs)
+        hooked_model = wrap_model_with_hooks(model_to_wrap, use_manual_sdpa=False)
+        actual = hooked_model(inputs)
+
+        self.assertTrue(mx.allclose(expected, actual))
+
     def test_run_with_cache(self):
         """Test run_with_cache functionality."""
         # Create a minimal model (reusing from above)

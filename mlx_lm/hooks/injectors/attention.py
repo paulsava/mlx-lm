@@ -36,6 +36,26 @@ def inject_attention_hooks(
     original_class = attn_module.__class__
 
     class HookedAttention(original_class):
+        def _apply_optional_norm(self, tensor: mx.array, attr_name: str) -> mx.array:
+            """Apply norm `attr_name` when the trailing dimensions match."""
+            if not hasattr(self, attr_name):
+                return tensor
+
+            norm_layer = getattr(self, attr_name)
+            weight = getattr(norm_layer, "weight", None)
+
+            if weight is not None:
+                weight_shape = tuple(weight.shape)
+                if len(weight_shape) > 0:
+                    tensor_shape = tuple(tensor.shape)
+                    if len(weight_shape) > len(tensor_shape):
+                        return tensor
+                    tail_shape = tensor_shape[-len(weight_shape):]
+                    if tail_shape != weight_shape:
+                        return tensor
+
+            return norm_layer(tensor)
+
         def __call__(
             self,
             x: mx.array,
@@ -55,10 +75,19 @@ def inject_attention_hooks(
             k = hook_k(k, cache=cache, mask=mask)
             v = hook_v(v, cache=cache, mask=mask)
 
+            # Apply optional norms before reshaping (covers models like Olmo)
+            q = self._apply_optional_norm(q, "q_norm")
+            k = self._apply_optional_norm(k, "k_norm")
+
             # Reshape for multi-head attention
-            q = q.reshape(B, L, self.n_heads, -1).transpose(0, 2, 1, 3)
-            k = k.reshape(B, L, self.n_kv_heads, -1).transpose(0, 2, 1, 3)
-            v = v.reshape(B, L, self.n_kv_heads, -1).transpose(0, 2, 1, 3)
+            q = q.reshape(B, L, self.n_heads, -1)
+            k = k.reshape(B, L, self.n_kv_heads, -1)
+            v = v.reshape(B, L, self.n_kv_heads, -1)
+
+            # Apply per-head norms if defined (covers Qwen-style attention)
+            q = self._apply_optional_norm(q, "q_norm").transpose(0, 2, 1, 3)
+            k = self._apply_optional_norm(k, "k_norm").transpose(0, 2, 1, 3)
+            v = v.transpose(0, 2, 1, 3)
 
             # Apply RoPE and handle cache
             if cache is not None:
