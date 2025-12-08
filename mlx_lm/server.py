@@ -631,6 +631,7 @@ class ResponseGenerator:
                         current_sampling = None
                         current_tokenizer = None
                         current_model_key = None
+                        batch_generator.close()
                         batch_generator = None
                         drain_batch = False
                     continue
