@@ -90,7 +90,8 @@ class TestGenerate(unittest.TestCase):
         sampler = make_sampler(temp=0.0)
         messages = [{"role": "user", "content": "hello"}]
         prompt = self.tokenizer.apply_chat_template(
-            messages, add_generation_prompt=True
+            messages,
+            add_generation_prompt=True,
         )
 
         for generation_result in stream_generate(
@@ -117,7 +118,8 @@ class TestGenerate(unittest.TestCase):
         # get prompt embeddings
         messages = [{"role": "user", "content": "Say 'TEST' and nothing else"}]
         prompt = self.tokenizer.apply_chat_template(
-            messages, add_generation_prompt=True
+            messages,
+            add_generation_prompt=True,
         )
         prompt_embeddings = self.model.model.embed_tokens(prompt)
 
@@ -140,7 +142,8 @@ class TestGenerate(unittest.TestCase):
         # get prompt embeddings
         messages = [{"role": "user", "content": "Say 'TEST' and nothing else"}]
         prompt = self.tokenizer.apply_chat_template(
-            messages, add_generation_prompt=True
+            messages,
+            add_generation_prompt=True,
         )
         prompt_embeddings = self.model.model.embed_tokens(prompt)
 
