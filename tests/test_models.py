@@ -2080,6 +2080,28 @@ class TestModels(unittest.TestCase):
                 "swa_v_head_dim": 64,
                 "partial_rotary_factor": 0.5,
             },
+            {
+                "model_type": "rwkv7",
+                "vocab_size": 1000,
+                "hidden_size": 128,
+                "intermediate_size": 128,
+                "norm_eps": 1e-5,
+                "head_dim": 32,
+                "num_hidden_layers": 4,
+                "a_low_rank_dim": 16,
+                "v_low_rank_dim": 16,
+                "gate_low_rank_dim": 16,
+                "decay_low_rank_dim": 16,
+            },
+            {
+                "model_type": "youtu_llm",
+                "vocab_size": 1000,
+                "hidden_size": 128,
+                "intermediate_size": 128,
+                "num_hidden_layers": 4,
+                "kv_lora_rank": 128,
+                "q_lora_rank": 256,
+            },
         ]
         for config in test_configs:
             model_type = config["model_type"]

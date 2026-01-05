@@ -467,6 +467,29 @@ class ModelProvider:
         return self.model, self.tokenizer
 
 
+def _make_sampler(args, tokenizer):
+    return make_sampler(
+        args.sampling.temperature,
+        top_p=args.sampling.top_p,
+        top_k=args.sampling.top_k,
+        min_p=args.sampling.min_p,
+        xtc_probability=args.sampling.xtc_probability,
+        xtc_threshold=args.sampling.xtc_threshold,
+        xtc_special_tokens=[
+            tokenizer.eos_token_id,
+            tokenizer.encode("\n"),
+        ],
+    )
+
+
+def _make_logits_processors(args):
+    return make_logits_processors(
+        args.logits.logit_bias,
+        args.logits.repetition_penalty,
+        args.logits.repetition_context_size,
+    )
+
+
 class ResponseGenerator:
     def __init__(self, model_provider: ModelProvider, prompt_cache: LRUPromptCache):
         self.model_provider = model_provider
@@ -487,7 +510,7 @@ class ResponseGenerator:
             tools = request.tools
             role_mapping = request.role_mapping
 
-            if tokenizer.chat_template:
+            if tokenizer.has_chat_template:
                 process_message_content(messages)
                 return tokenizer.apply_chat_template(
                     messages,
@@ -510,12 +533,6 @@ class ResponseGenerator:
         for c in self.model_provider.cache_types:
             if c not in (KVCache, RotatingKVCache):
                 return False
-        if args.logits.logit_bias is not None:
-            return False
-        if args.logits.repetition_penalty != 0:
-            return False
-        if args.logprobs > 0:
-            return False
         if args.seed is not None:
             return False
 
@@ -552,7 +569,11 @@ class ResponseGenerator:
         while not self._stop:
             request = None
             if not drain_batch:
-                timeout = 0.1 if batch_generator is None else None
+                timeout = (
+                    None
+                    if (batch_generator is not None and len(batch_results) > 0)
+                    else 0.1
+                )
                 request = get_next_request(timeout=timeout)
 
             # We got a request
@@ -565,7 +586,6 @@ class ResponseGenerator:
                 if (
                     batch_generator is not None
                     and current_model == args.model
-                    and current_sampling == args.sampling
                     and is_batchable
                 ):
                     prompt = self._tokenize(current_tokenizer, request)
@@ -589,7 +609,11 @@ class ResponseGenerator:
                         cache = make_prompt_cache(self.model_provider.model)
 
                     (uid,) = batch_generator.insert(
-                        [rest], args.max_tokens, caches=[cache]
+                        [rest],
+                        args.max_tokens,
+                        caches=[cache],
+                        samplers=[_make_sampler(args, tokenizer)],
+                        logits_processors=[_make_logits_processors(args)],
                     )
                     batch_results[uid] = {
                         "ctx": ctx,
@@ -616,25 +640,12 @@ class ResponseGenerator:
                         continue
 
                     current_model = args.model
-                    current_sampling = args.sampling
                     current_tokenizer = tokenizer
                     current_model_key = self.model_provider.model_key
                     batch_results = {}
                     batch_generator = BatchGenerator(
                         model,
                         stop_tokens=tokenizer.eos_token_ids,
-                        sampler=make_sampler(
-                            args.sampling.temperature,
-                            top_p=args.sampling.top_p,
-                            top_k=args.sampling.top_k,
-                            min_p=args.sampling.min_p,
-                            xtc_probability=args.sampling.xtc_probability,
-                            xtc_threshold=args.sampling.xtc_threshold,
-                            xtc_special_tokens=[
-                                tokenizer.eos_token_id,
-                                tokenizer.encode("\n"),
-                            ],
-                        ),
                         prompt_progress_callback=progress_callback,
                     )
                     unprocessed_requests.append((rqueue, request, args))
@@ -746,23 +757,8 @@ class ResponseGenerator:
                 mx.random.seed(args.seed)
 
             # Make the sampler and logit processor
-            sampler = make_sampler(
-                args.sampling.temperature,
-                top_p=args.sampling.top_p,
-                top_k=args.sampling.top_k,
-                min_p=args.sampling.min_p,
-                xtc_probability=args.sampling.xtc_probability,
-                xtc_threshold=args.sampling.xtc_threshold,
-                xtc_special_tokens=[
-                    tokenizer.eos_token_id,
-                    tokenizer.encode("\n"),
-                ],
-            )
-            logits_processors = make_logits_processors(
-                args.logits.logit_bias,
-                args.logits.repetition_penalty,
-                args.logits.repetition_context_size,
-            )
+            sampler = _make_sampler(args, tokenizer)
+            logits_processors = _make_logits_processors(args)
 
             # Load the KV cache
             cache, rest = self.prompt_cache.fetch_nearest_cache(
@@ -1439,6 +1435,18 @@ class APIHandler(BaseHTTPRequestHandler):
             }
             for repo in downloaded_models
         ]
+
+        if self.response_generator.cli_args.model:
+            model_path = Path(self.response_generator.cli_args.model)
+            if model_path.exists():
+                model_id = str(model_path.resolve())
+                models.append(
+                    {
+                        "id": model_id,
+                        "object": "model",
+                        "created": self.created,
+                    }
+                )
 
         response = {"object": "list", "data": models}
 
