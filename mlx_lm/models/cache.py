@@ -375,6 +375,10 @@ class KVCache(_BaseCache):
     def make_mask(self, *args, **kwargs):
         return create_attention_mask(*args, offset=self.offset, **kwargs)
 
+    @classmethod
+    def merge(_, caches):
+        return BatchKVCache.merge(caches)
+
 
 class RotatingKVCache(_BaseCache):
     step = 256
@@ -546,11 +550,16 @@ class RotatingKVCache(_BaseCache):
                 mask = mx.roll(mask, shift=idx + 1)
                 return mask
 
+    @classmethod
+    def merge(_, caches):
+        return BatchRotatingKVCache.merge(caches)
+
 
 class ArraysCache(_BaseCache):
     def __init__(self, size, left_padding: Optional[List[int]] = None):
         self.cache = [None] * size
         self.left_padding = mx.array(left_padding) if left_padding else None
+        self.lengths = None
 
     def __setitem__(self, idx, value):
         self.cache[idx] = value
@@ -571,20 +580,56 @@ class ArraysCache(_BaseCache):
         In-place filter to keep just the given indices in the cache.
         """
         self.cache = [c[batch_indices] for c in self.cache]
-        self.left_padding = None
 
     def extend(self, other):
         """
         In-place extend this cache with the other cache.
         """
         self.cache = [mx.concatenate([c, o]) for c, o in zip(self.cache, other.cache)]
+
+    def extract(self, idx):
+        cache = ArraysCache(len(self.cache))
+        cache.cache = [c[idx : idx + 1] for c in self.cache]
+        return cache
+
+    def prepare(self, lengths=None, **kwargs):
+        self.lengths = mx.array(lengths)
+
+    def finalize(self):
+        self.lengths = None
         self.left_padding = None
 
+    def advance(self, N):
+        if self.lengths is not None:
+            self.lengths -= N
+        if self.left_padding is not None:
+            self.left_padding -= N
+
     def make_mask(self, N: int):
-        if self.cache[0] is None and self.left_padding is not None:
-            return mx.arange(N) >= self.left_padding[:, None]
+        if self.left_padding is not None:
+            pos = mx.arange(N)
+            return pos >= self.left_padding[:, None]
+        elif self.lengths is not None:
+            pos = mx.arange(N)
+            return pos < self.lengths[:, None]
         else:
             return None
+
+    @classmethod
+    def merge(cls, caches):
+        n_state = len(caches[0].cache)
+        B = len(caches)
+        cache = cls(n_state)
+        for e in range(n_state):
+            c_init = next(iter(c[e] for c in caches if c[e] is not None))
+            shape = list(c_init.shape)
+            shape[0] = B
+            cache[e] = mx.zeros(shape, c_init.dtype)
+            for i in range(B):
+                if caches[i][e] is None:
+                    continue
+                cache[e][i : i + 1] = caches[i][e]
+        return cache
 
 
 class MambaCache(ArraysCache):
@@ -592,9 +637,13 @@ class MambaCache(ArraysCache):
         super().__init__(size=2, left_padding=left_padding)
 
 
-class ChunkedKVCache(KVCache):
+class ChunkedKVCache(_BaseCache):
+    step = 256
+
     def __init__(self, chunk_size):
-        super().__init__()
+        self.keys = None
+        self.values = None
+        self.offset = 0
         self.chunk_size = chunk_size
         self.start_position = 0
 
@@ -629,6 +678,24 @@ class ChunkedKVCache(KVCache):
         self.keys[..., prev:end, :] = keys
         self.values[..., prev:end, :] = values
         return self.keys[..., :end, :], self.values[..., :end, :]
+
+    @property
+    def state(self):
+        if self.offset == self.keys.shape[2]:
+            return self.keys, self.values
+        else:
+            return (
+                self.keys[..., : self.offset, :],
+                self.values[..., : self.offset, :],
+            )
+
+    @state.setter
+    def state(self, v):
+        self.keys, self.values = v
+        self.offset = self.keys.shape[2]
+
+    def is_trimmable(self):
+        return True
 
     def trim(self, n):
         n = min(self.offset - self.start_position, n)
@@ -685,6 +752,18 @@ class CacheList(_BaseCache):
         """
         for c, o in zip(self.caches, other.caches):
             c.extend(o)
+
+    @classmethod
+    def merge(cls, caches):
+        cache = cls()
+        cache.caches = tuple(
+            caches[0].caches[i].merge([c.caches[i] for c in caches])
+            for i in range(len(caches[0].caches))
+        )
+        return cache
+
+    def extract(self, idx):
+        return CacheList(*(c.extract(idx) for c in self.caches))
 
 
 def dynamic_roll(x, shifts, axis):
@@ -871,6 +950,8 @@ class BatchKVCache(_BaseCache):
         keys = mx.zeros((B, H, max_length, Dk), dtype=dt)
         values = mx.zeros((B, H, max_length, Dv), dtype=dt)
         for i, (p, c) in enumerate(zip(padding, caches)):
+            if c.keys is None:
+                continue
             keys[i : i + 1, :, p : p + c.offset] = c.keys[..., : c.offset, :]
             values[i : i + 1, :, p : p + c.offset] = c.values[..., : c.offset, :]
 
@@ -1157,12 +1238,10 @@ class BatchRotatingKVCache(_BaseCache):
             cache.keys = mx.roll(cache.keys, -self._idx, axis=2)
             cache.values = mx.roll(cache.values, -self._idx, axis=2)
             cache._idx = self.max_size
-        if padding > 0:
-            cache.keys = mx.contiguous(cache.keys[:, :, padding : cache._idx])
-            cache.values = mx.contiguous(cache.values[:, :, padding : cache._idx])
+        cache.keys = mx.contiguous(cache.keys[:, :, padding : cache._idx])
+        cache.values = mx.contiguous(cache.values[:, :, padding : cache._idx])
         cache.offset = offset
         cache._idx = cache.keys.shape[2]
-
         return cache
 
     @classmethod
@@ -1185,8 +1264,10 @@ class BatchRotatingKVCache(_BaseCache):
         keys = mx.zeros((B, H, max_length, Dk), dtype=dt)
         values = mx.zeros((B, H, max_length, Dv), dtype=dt)
         for i, (p, c) in enumerate(zip(padding, caches)):
-            keys[i : i + 1, :, p : p + c.offset] = c._temporal_order(c.keys)
-            values[i : i + 1, :, p : p + c.offset] = c._temporal_order(c.values)
+            if c.keys is None:
+                continue
+            keys[i : i + 1, :, p : p + c._idx] = c._temporal_order(c.keys)
+            values[i : i + 1, :, p : p + c._idx] = c._temporal_order(c.values)
 
         cache = cls(caches[0].max_size, padding)
         cache.keys = keys

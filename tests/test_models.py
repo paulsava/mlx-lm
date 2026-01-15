@@ -1252,6 +1252,29 @@ class TestModels(unittest.TestCase):
             model, args.model_type, args.vocab_size, args.num_hidden_layers
         )
 
+    def test_iquestloopcoder(self):
+        from mlx_lm.models import iquestloopcoder
+
+        args = iquestloopcoder.ModelArgs(
+            model_type="iquestloopcoder",
+            hidden_size=256,
+            num_hidden_layers=2,
+            intermediate_size=512,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            rms_norm_eps=1e-5,
+            head_dim=32,
+            vocab_size=1000,
+            rope_theta=500000.0,
+            tie_word_embeddings=False,
+            loop_num=2,
+            loop_window_size=32,
+        )
+        model = iquestloopcoder.Model(args)
+        self.model_test_runner(
+            model, args.model_type, args.vocab_size, args.num_hidden_layers
+        )
+
     def test_smollm3(self):
         from mlx_lm.models import smollm3
 
@@ -1892,7 +1915,6 @@ class TestModels(unittest.TestCase):
                 "n_groups": 4,
                 "use_bias": False,
                 "use_conv_bias": False,
-                "chunk_size": 32,
                 "tie_word_embeddings": True,
                 "time_step_limit": (0.01, 10),
                 "time_step_rank": "auto",
@@ -1973,6 +1995,31 @@ class TestModels(unittest.TestCase):
                 "first_k_dense_replace": 0,
                 "layer_group_size": 2,
                 "group_norm_size": 1,
+                "max_position_embeddings": 1000,
+            },
+            {
+                "model_type": "qwen3_next",
+                "hidden_size": 128,
+                "num_hidden_layers": 4,
+                "intermediate_size": 128,
+                "num_attention_heads": 8,
+                "num_key_value_heads": 4,
+                "vocab_size": 1000,
+                "linear_num_value_heads": 4,
+                "linear_num_key_heads": 4,
+                "linear_key_head_dim": 32,
+                "linear_value_head_dim": 32,
+                "linear_conv_kernel_dim": 3,
+                "num_experts": 4,
+                "num_experts_per_tok": 2,
+                "decoder_sparse_step": 1,
+                "shared_expert_intermediate_size": 128,
+                "mlp_only_layers": [0],
+                "moe_intermediate_size": 128,
+                "rms_norm_eps": 1e-5,
+                "head_dim": 64,
+                "rope_theta": 1000.0,
+                "partial_rotary_factor": 0.5,
                 "max_position_embeddings": 1000,
             },
             {
@@ -2212,6 +2259,50 @@ class TestModels(unittest.TestCase):
         self.assertTrue(mx.allclose(out, out_m, atol=1e-4, rtol=1e-4))
         self.assertTrue(mx.allclose(out_state, out_state_m, atol=1e-4, rtol=1e-4))
 
+    def test_ssm_right_pad(self):
+        batch_size = 1
+        n_group = 1
+        num_heads = 48
+        head_dim = 64
+        state_dim = 128
+        seq_len = 4
+        pad = 2
+
+        hidden_states = mx.random.normal(
+            shape=(batch_size, seq_len + pad, num_heads, head_dim)
+        )
+        B = mx.random.normal(shape=(batch_size, seq_len + pad, n_group, state_dim))
+        C = mx.random.normal(shape=(batch_size, seq_len + pad, n_group, state_dim))
+        dt = mx.random.normal(shape=(batch_size, seq_len + pad, num_heads))
+        dt_bias = mx.random.normal(shape=(num_heads,))
+        A_log = mx.random.normal(shape=(num_heads,))
+        D = mx.random.normal(shape=(num_heads,))
+        out, out_state = ssm_attn(
+            hidden_states[:, :-pad],
+            A_log,
+            B[:, :-pad],
+            C[:, :-pad],
+            D,
+            dt[:, :-pad],
+            dt_bias,
+        )
+        mask = mx.array([[True] * seq_len + [False] * pad])
+        lengths = mx.array([seq_len])
+        out_m, out_state_m = ssm_attn(
+            hidden_states,
+            A_log,
+            B,
+            C,
+            D,
+            dt,
+            dt_bias,
+            mask=mask,
+            lengths=lengths,
+        )
+        out_m = out_m[:, :-pad]
+        self.assertTrue(mx.allclose(out, out_m, atol=1e-4, rtol=1e-4))
+        self.assertTrue(mx.allclose(out_state, out_state_m, atol=1e-4, rtol=1e-4))
+
     def test_gated_delta(self):
         mx.random.seed(0)
         for B in [1, 2]:
@@ -2246,23 +2337,26 @@ class TestModels(unittest.TestCase):
         k = mx.random.normal(shape=(B, T, Hk, Dk))
         v = mx.random.normal(shape=(B, T, Hv, Dv))
         g = mx.random.normal(shape=(B, T, Hv))
-        mask = mx.array([[False, True, True]])
         beta = mx.random.normal(shape=(B, T, Hv))
         state = mx.random.normal(shape=(B, Hv, Dk, Dv))
 
-        y_gt, st_gt = gated_delta_ops(
-            q[:, 1:],
-            k[:, 1:],
-            v[:, 1:],
-            g[:, 1:],
-            beta[:, 1:],
-            state,
-        )
-        for fn in [gated_delta_ops, gated_delta_kernel]:
-            y, st = fn(q, k, v, g, beta, state, mask)
-            y = y[:, 1:]
-            self.assertTrue(mx.allclose(y, y_gt, rtol=1e-4, atol=1e-4))
-            self.assertTrue(mx.allclose(st, st_gt, rtol=1e-4, atol=1e-3))
+        for s, e, mask in [
+            (1, 3, mx.array([[False, True, True]])),
+            (0, 2, mx.array([[True, True, False]])),
+        ]:
+            y_gt, st_gt = gated_delta_ops(
+                q[:, s:e],
+                k[:, s:e],
+                v[:, s:e],
+                g[:, s:e],
+                beta[:, s:e],
+                state,
+            )
+            for fn in [gated_delta_ops, gated_delta_kernel]:
+                y, st = fn(q, k, v, g, beta, state, mask)
+                y = y[:, s:e]
+                self.assertTrue(mx.allclose(y, y_gt, rtol=1e-4, atol=1e-4))
+                self.assertTrue(mx.allclose(st, st_gt, rtol=1e-4, atol=1e-3))
 
 
 if __name__ == "__main__":

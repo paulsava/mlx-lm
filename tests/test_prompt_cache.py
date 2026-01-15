@@ -10,6 +10,7 @@ import mlx.core as mx
 from mlx_lm.generate import generate_step
 from mlx_lm.models.base import create_attention_mask, create_causal_mask
 from mlx_lm.models.cache import (
+    ArraysCache,
     BatchKVCache,
     BatchRotatingKVCache,
     CacheList,
@@ -327,6 +328,26 @@ class TestPromptCache(unittest.TestCase):
         c = CacheList(MambaCache(), KVCache())
         self.assertFalse(c.is_trimmable())
 
+        c1 = CacheList(ArraysCache(size=1), KVCache())
+        c1[0][0] = mx.random.normal(shape=(1, 2, 4, 4))
+        c1[1].update_and_fetch(
+            mx.random.normal(shape=(1, 2, 5, 4)), mx.random.normal(shape=(1, 2, 5, 4))
+        )
+
+        c2 = CacheList(ArraysCache(size=1), KVCache())
+        c2[0][0] = mx.random.normal(shape=(1, 2, 4, 4))
+        c2[1].update_and_fetch(
+            mx.random.normal(shape=(1, 2, 7, 4)), mx.random.normal(shape=(1, 2, 7, 4))
+        )
+
+        merged_cache = CacheList.merge((c1, c2))
+        c1_ex = merged_cache.extract(0)
+        self.assertTrue(mx.array_equal(c1_ex[0][0], c1[0][0]))
+        self.assertTrue(mx.array_equal(c1_ex[1].state[0], c1[1].state[0]))
+        c2_ex = merged_cache.extract(1)
+        self.assertTrue(mx.array_equal(c2_ex[0][0], c2[0][0]))
+        self.assertTrue(mx.array_equal(c2_ex[1].state[0], c2[1].state[0]))
+
     def test_make_mask_with_cache(self):
         # For 1 time step with no cache, don't need a mask
         mask = create_attention_mask(mx.zeros((1, 1)), cache=None, return_array=False)
@@ -568,6 +589,29 @@ class TestPromptCache(unittest.TestCase):
         k, v = cache.update_and_fetch(k, v)
         self.assertEqual(k.shape[2], 10)
         self.assertEqual(v.shape[2], 10)
+
+    def test_merge_with_empty_caches(self):
+        c1 = ArraysCache(2)
+        c2 = ArraysCache(2)
+        c2[0] = mx.zeros((1, 4))
+        c2[1] = mx.zeros((1, 4))
+        c_out = ArraysCache.merge((c1, c2))
+        self.assertEqual(c_out[0].shape, (2, 4))
+        self.assertEqual(c_out[1].shape, (2, 4))
+
+        c1 = KVCache()
+        c2 = KVCache()
+        kv = mx.zeros((1, 4, 4, 4))
+        c2.update_and_fetch(kv, kv)
+        c_out = KVCache.merge((c1, c2))
+        self.assertEqual(c_out.keys.shape, (2, 4, 4, 4))
+
+        c1 = RotatingKVCache(max_size=4)
+        c2 = RotatingKVCache(max_size=4)
+        kv = mx.zeros((1, 4, 4, 4))
+        c2.update_and_fetch(kv, kv)
+        c_out = KVCache.merge((c1, c2))
+        self.assertEqual(c_out.keys.shape, (2, 4, 4, 4))
 
 
 if __name__ == "__main__":

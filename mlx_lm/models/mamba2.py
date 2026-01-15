@@ -7,6 +7,7 @@ from typing import Optional, Tuple, Union
 import mlx.core as mx
 import mlx.nn as nn
 
+from .activations import swiglu
 from .base import BaseModelArgs, create_ssm_mask
 from .cache import MambaCache
 from .ssm import ssm_update
@@ -48,7 +49,7 @@ class MambaRMSNormGated(nn.Module):
 
     def __call__(self, hidden_states: mx.array, gate: mx.array = None) -> mx.array:
         if gate is not None:
-            hidden_states = hidden_states * nn.silu(gate)
+            hidden_states = swiglu(gate, hidden_states)
         return mx.fast.rms_norm(hidden_states, self.weight, self.eps)
 
 
@@ -93,9 +94,15 @@ class Mamba2Block(nn.Module):
             self.intermediate_size, self.hidden_size, bias=args.use_bias
         )
 
-    def _apply_conv(
-        self, conv_input: mx.array, cache: Optional[MambaCache] = None
+    def _conv(
+        self,
+        conv_input: mx.array,
+        cache: Optional[MambaCache],
+        mask: Optional[mx.array],
     ) -> mx.array:
+        if mask is not None:
+            conv_input = mx.where(mask[..., None], conv_input, 0)
+
         if cache is not None:
             if cache[0] is None:
                 conv_state = mx.zeros(
@@ -105,7 +112,14 @@ class Mamba2Block(nn.Module):
             else:
                 conv_state = cache[0]
             padded_input = mx.concatenate([conv_state, conv_input], axis=1)
-            cache[0] = padded_input[:, -(self.conv_kernel_size - 1) :, :]
+            n_keep = self.conv_kernel_size - 1
+            if cache.lengths is not None:
+                t = padded_input.shape[1]
+                ends = mx.clip(cache.lengths, 0, t - n_keep)
+                positions = (ends[:, None] + mx.arange(n_keep))[..., None]
+                cache[0] = mx.take_along_axis(padded_input, positions, axis=1)
+            else:
+                cache[0] = padded_input[:, -n_keep:, :]
         else:
             padded_input = mx.pad(
                 conv_input, [(0, 0), (self.conv_kernel_size - 1, 0), (0, 0)]
@@ -120,8 +134,8 @@ class Mamba2Block(nn.Module):
         B: mx.array,
         C: mx.array,
         dt: mx.array,
-        state: Optional[mx.array] = None,
-        mask: Optional[mx.array] = None,
+        cache: Optional[MambaCache],
+        mask: Optional[mx.array],
     ) -> mx.array:
         batch_size, seq_len, _ = hidden_states.shape
         hidden_states = hidden_states.reshape(
@@ -129,6 +143,11 @@ class Mamba2Block(nn.Module):
         )
         B = B.reshape(batch_size, seq_len, self.n_groups, self.ssm_state_size)
         C = C.reshape(batch_size, seq_len, self.n_groups, self.ssm_state_size)
+        if cache:
+            state = cache[1]
+            lengths = cache.lengths
+        else:
+            state, lengths = None, None
         y, state = ssm_update(
             hidden_states,
             self.A_log,
@@ -140,8 +159,11 @@ class Mamba2Block(nn.Module):
             state,
             self.time_step_limit,
             mask,
+            lengths,
         )
-        return y.reshape(batch_size, seq_len, self.intermediate_size), state
+        if cache:
+            cache[1] = state
+        return y.reshape(batch_size, seq_len, self.intermediate_size)
 
     def __call__(
         self,
@@ -155,9 +177,7 @@ class Mamba2Block(nn.Module):
             [self.intermediate_size, self.intermediate_size + self.conv_dim],
             axis=-1,
         )
-        if mask is not None:
-            conv_input = mx.where(mask[..., None], conv_input, 0)
-        conv_output = self._apply_conv(conv_input, cache)
+        conv_output = self._conv(conv_input, cache, mask)
         hidden_states, B, C = mx.split(
             conv_output,
             [
@@ -166,10 +186,9 @@ class Mamba2Block(nn.Module):
             ],
             axis=-1,
         )
-        state = cache[1] if cache else None
-        y, state = self._ssm(hidden_states, B, C, dt, state, mask=mask)
+        y = self._ssm(hidden_states, B, C, dt, cache, mask=mask)
         if cache:
-            cache[1] = state
+            cache.advance(y.shape[1])
         y = self.norm(y, gate)
         return self.out_proj(y)
 

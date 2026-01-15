@@ -908,16 +908,12 @@ def _make_cache(model, left_padding):
 def _merge_caches(caches):
     batch_cache = []
     for i in range(len(caches[0])):
-        cache = None
-        if isinstance(caches[0][i], KVCache):
-            cache = BatchKVCache.merge([c[i] for c in caches])
-        elif isinstance(caches[0][i], RotatingKVCache):
-            cache = BatchRotatingKVCache.merge([c[i] for c in caches])
+        if hasattr(caches[0][i], "merge"):
+            batch_cache.append(caches[0][i].merge([c[i] for c in caches]))
         else:
             raise ValueError(
                 f"{type(caches[0][i])} does not yet support batching with history"
             )
-        batch_cache.append(cache)
     return batch_cache
 
 
@@ -1027,9 +1023,11 @@ class BatchGenerator:
 
     def _process_prompts(self, prompts):
         uids, inputs, max_tokens, caches, samplers, logits_processors = zip(*prompts)
+        if hasattr(caches[0][0], "keys"):
+            cache_is_empty = all(c[0].keys is None for c in caches)
+        else:
+            cache_is_empty = all(c[0][0] is None for c in caches)
 
-        cache_lengths = [cache.cache_length(c) for c in caches]
-        max_cache_length = max(cache_lengths)
         lengths = [len(p) for p in inputs]
         max_length = max(lengths)
         padding = [max_length - l for l in lengths]
@@ -1042,7 +1040,7 @@ class BatchGenerator:
         # New prompts so
         #   1. Left-pad the inputs
         #   2. Process
-        if max_cache_length == 0:
+        if cache_is_empty:
             inputs = _left_pad_prompts(inputs, max_length=max_length)
             prompt_cache = _make_cache(self.model, padding)
 
@@ -1058,7 +1056,6 @@ class BatchGenerator:
                         for uid, length in zip(uids, lengths)
                     ]
                 )
-                mx.clear_cache()
 
         # Further prompt processing so we need to
         #   1. Merge the KV caches and prepare for right padded prompts
@@ -1071,7 +1068,8 @@ class BatchGenerator:
             prompt_cache = _merge_caches(caches)
 
             for c in prompt_cache:
-                c.prepare(lengths=lengths, right_padding=padding)
+                # subtract one from lengths since we don't process the last token during prefill
+                c.prepare(lengths=[l - 1 for l in lengths], right_padding=padding)
 
             while inputs.shape[1] > 1:
                 n_to_process = min(self.prefill_step_size, inputs.shape[1] - 1)
@@ -1087,15 +1085,17 @@ class BatchGenerator:
                 )
                 mx.clear_cache()
 
-            for c in prompt_cache:
-                c.finalize()
             mx.eval([c.state for c in prompt_cache])
-            mx.clear_cache()
             inputs = last_inputs
+
+        for c in prompt_cache:
+            c.finalize()
+        mx.clear_cache()
 
         y, logprobs = self._step(
             inputs, prompt_cache, samplers, logits_processors, tokens
         )
+
         mx.async_eval(y, logprobs)
 
         return Batch(
@@ -1251,7 +1251,7 @@ class BatchGenerator:
 def batch_generate(
     model,
     tokenizer,
-    prompts: List[int],
+    prompts: List[List[int]],
     prompt_caches: Optional[List[List[Any]]] = None,
     max_tokens: Union[int, List[int]] = 128,
     verbose: bool = False,
@@ -1265,7 +1265,7 @@ def batch_generate(
     Args:
        model (nn.Module): The language model.
        tokenizer (PreTrainedTokenizer): The tokenizer.
-       prompt (List[List[int]]): The input prompts.
+       prompts (List[List[int]]): The input prompts.
        prompt_caches (List[List[Any]], optional): Pre-computed prompt-caches
           for each input prompt. Note, unlike ``generate_step``, the caches
           won't be updated in-place.
