@@ -14,7 +14,7 @@ from .base import (
     create_ssm_mask,
     scaled_dot_product_attention,
 )
-from .cache import KVCache, MambaCache
+from .cache import ArraysCache, KVCache
 from .ssm import ssm_update
 from .switch_layers import SwitchMLP
 
@@ -36,7 +36,6 @@ class ModelArgs(BaseModelArgs):
     ssm_state_size: int
     conv_kernel: int
     n_groups: int
-    time_step_limit: Tuple[float, float]
     mlp_bias: bool
     layer_norm_epsilon: float
     use_bias: bool
@@ -52,6 +51,17 @@ class ModelArgs(BaseModelArgs):
     num_experts_per_tok: Optional[int] = None
     norm_topk_prob: Optional[bool] = None
     routed_scaling_factor: Optional[float] = None
+    time_step_limit: Optional[Tuple[float, float]] = None
+    time_step_min: Optional[float] = None
+    time_step_max: Optional[float] = None
+
+    def __post_init__(self):
+        if (
+            self.time_step_limit is None
+            and self.time_step_min is not None
+            and self.time_step_max is not None
+        ):
+            self.time_step_limit = (self.time_step_min, self.time_step_max)
 
 
 class MambaRMSNormGated(nn.Module):
@@ -115,7 +125,7 @@ class NemotronHMamba2Mixer(nn.Module):
     def _conv(
         self,
         conv_input: mx.array,
-        cache: Optional[MambaCache],
+        cache: Optional[ArraysCache],
         mask: Optional[mx.array],
     ) -> mx.array:
         if mask is not None:
@@ -152,7 +162,7 @@ class NemotronHMamba2Mixer(nn.Module):
         B: mx.array,
         C: mx.array,
         dt: mx.array,
-        cache: Optional[MambaCache],
+        cache: Optional[ArraysCache],
         mask: Optional[mx.array],
     ) -> mx.array:
         batch_size, seq_len, _ = hidden_states.shape
@@ -189,7 +199,7 @@ class NemotronHMamba2Mixer(nn.Module):
         self,
         hidden_states: mx.array,
         mask: Optional[mx.array],
-        cache: Optional[MambaCache] = None,
+        cache: Optional[ArraysCache] = None,
     ) -> mx.array:
 
         projected = self.in_proj(hidden_states)
@@ -485,7 +495,7 @@ class Model(nn.Module):
         caches = []
         for l in self.layers:
             if l.block_type == "M":
-                caches.append(MambaCache())
+                caches.append(ArraysCache(size=2))
             elif l.block_type == "*":
                 caches.append(KVCache())
         return caches
