@@ -39,6 +39,8 @@ setup(
         "mlx_lm.tuner",
         "mlx_lm.tool_parsers",
         "mlx_lm.chat_templates",
+        "mlx_lm.hooks",
+        "mlx_lm.hooks.injectors",
     ],
     python_requires=">=3.8",
     extras_require={
