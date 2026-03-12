@@ -26,19 +26,19 @@ def wrap_model_with_hooks(model: nn.Module, use_manual_sdpa: bool = True) -> nn.
 
     # Inject hooks into each layer
     # Access layers through model.model.layers (standard MLX-LM structure)
-    if not hasattr(model, "model"):
+    # or model.language_model.model.layers (VLM-style wrappers like Qwen3.5)
+    layers = None
+    if hasattr(model, "model") and hasattr(model.model, "layers"):
+        layers = model.model.layers
+    elif hasattr(model, "language_model") and hasattr(model.language_model, "model") and hasattr(model.language_model.model, "layers"):
+        layers = model.language_model.model.layers
+
+    if layers is None:
         raise ValueError(
-            "Model does not have expected structure (model.model.layers). "
+            "Model does not have expected structure. "
+            "Expected model.model.layers or model.language_model.model.layers. "
             "This hook system currently only supports standard MLX-LM models."
         )
-
-    if not hasattr(model.model, "layers"):
-        raise ValueError(
-            "Model does not have expected structure (model.model.layers). "
-            "This hook system currently only supports standard MLX-LM models."
-        )
-
-    layers = model.model.layers
 
     for i, layer in enumerate(layers):
         # Inject block-level residual hooks
