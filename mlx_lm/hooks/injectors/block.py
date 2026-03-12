@@ -26,6 +26,21 @@ def inject_block_hooks(
     hook_resid_mid = create_hook_point("hook_resid_mid")
     hook_resid_post = create_hook_point("hook_resid_post")
 
+    # Detect which attention attribute this block uses
+    if hasattr(block_module, "linear_attn"):
+        attn_attr = "linear_attn"
+    elif hasattr(block_module, "self_attn"):
+        attn_attr = "self_attn"
+    else:
+        for name in ["attn", "attention"]:
+            if hasattr(block_module, name):
+                attn_attr = name
+                break
+        else:
+            raise ValueError(
+                f"Block at layer {layer_idx} has no recognized attention attribute."
+            )
+
     original_class = block_module.__class__
 
     class HookedBlock(original_class):
@@ -39,7 +54,8 @@ def inject_block_hooks(
             context_kwargs = {'cache': cache, 'mask': mask}
             resid = hook_resid_pre(x, **context_kwargs)
 
-            attn_out = self.self_attn(
+            attn_module = getattr(self, attn_attr)
+            attn_out = attn_module(
                 self.input_layernorm(resid),
                 mask,
                 cache

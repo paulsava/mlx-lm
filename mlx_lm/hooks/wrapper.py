@@ -1,7 +1,12 @@
 import mlx.nn as nn
 
 from .hooked_module import HookedRootModule
-from .injectors import inject_attention_hooks, inject_block_hooks, inject_mlp_hooks
+from .injectors import (
+    inject_attention_hooks,
+    inject_block_hooks,
+    inject_linear_attention_hooks,
+    inject_mlp_hooks,
+)
 
 
 def wrap_model_with_hooks(model: nn.Module, use_manual_sdpa: bool = True) -> nn.Module:
@@ -40,15 +45,18 @@ def wrap_model_with_hooks(model: nn.Module, use_manual_sdpa: bool = True) -> nn.
         inject_block_hooks(layer, i, model)
 
         # Detect and inject attention hooks
-        # Support multiple naming conventions: self_attn, attn, attention
-        attn_module = None
-        for attr_name in ["self_attn", "attn", "attention"]:
-            if hasattr(layer, attr_name):
-                attn_module = getattr(layer, attr_name)
-                break
+        # Support both standard softmax attention and linear attention (GatedDeltaNet)
+        if hasattr(layer, "linear_attn"):
+            inject_linear_attention_hooks(layer.linear_attn, i, model)
+        else:
+            attn_module = None
+            for attr_name in ["self_attn", "attn", "attention"]:
+                if hasattr(layer, attr_name):
+                    attn_module = getattr(layer, attr_name)
+                    break
 
-        if attn_module is not None:
-            inject_attention_hooks(attn_module, i, model, use_manual_sdpa)
+            if attn_module is not None:
+                inject_attention_hooks(attn_module, i, model, use_manual_sdpa)
 
         # Detect and inject MLP hooks
         # Support multiple naming conventions: mlp, feed_forward, ffn
