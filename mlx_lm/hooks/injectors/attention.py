@@ -80,9 +80,12 @@ def inject_attention_hooks(
             k = self._apply_optional_norm(k, "k_norm")
 
             # Reshape for multi-head attention
-            q = q.reshape(B, L, self.n_heads, -1)
-            k = k.reshape(B, L, self.n_kv_heads, -1)
-            v = v.reshape(B, L, self.n_kv_heads, -1)
+            # Support both Llama (n_heads/n_kv_heads) and Qwen (num_attention_heads/num_key_value_heads)
+            n_heads = getattr(self, "n_heads", None) or self.num_attention_heads
+            n_kv_heads = getattr(self, "n_kv_heads", None) or self.num_key_value_heads
+            q = q.reshape(B, L, n_heads, -1)
+            k = k.reshape(B, L, n_kv_heads, -1)
+            v = v.reshape(B, L, n_kv_heads, -1)
 
             # Apply per-head norms if defined (covers Qwen-style attention)
             q = self._apply_optional_norm(q, "q_norm").transpose(0, 2, 1, 3)
