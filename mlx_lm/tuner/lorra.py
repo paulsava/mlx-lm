@@ -275,6 +275,7 @@ def train_lorra(
 
             t0 = time.time()
             loss_val, grads = loss_and_grad(model, input_ids, frozen_h)
+            grads, _ = opt.clip_grad_norm(grads, max_norm=1.0)
             optimizer.update(model, grads)
             mx.eval(model.parameters(), optimizer.state)
 
