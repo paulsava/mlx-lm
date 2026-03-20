@@ -178,6 +178,7 @@ def train_lorra(
 
     # ── Pre-compute frozen hidden states ─────────────────────────────
     # Zero out LoRA params temporarily to get true baseline activations
+    model.eval()  # Use fast Metal kernels for inference-only collection
     print("\nPre-computing frozen hidden states...")
     lora_state = dict(tree_flatten(model.trainable_parameters()))
     zero_state = {k: mx.zeros_like(v) for k, v in lora_state.items()}
@@ -254,6 +255,7 @@ def train_lorra(
     print(f"  Alpha: {config.alpha}")
     print(f"  LR: {config.lr}")
 
+    model.train()  # Enable training mode (uses ops fallback for GatedDeltaNet VJP)
     optimizer = opt.Adam(learning_rate=config.lr)
     global_step = 0
 
