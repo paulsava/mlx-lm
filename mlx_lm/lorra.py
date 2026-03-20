@@ -64,6 +64,8 @@ def build_parser():
     parser.add_argument("--max-seq-length", type=int, default=128)
     parser.add_argument("--report-every", type=int, default=5)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--enable-thinking", action="store_true",
+                        help="Enable thinking/reasoning mode in chat template")
 
     # Output
     parser.add_argument("--output-dir", type=str, default="outputs/lorra")
@@ -91,12 +93,16 @@ def load_prompts(path: str, field: str = "prompt") -> list[str]:
     return sorted(prompts)
 
 
-def test_generate(model, tokenizer, prompt_text: str, max_tokens: int = 200) -> str:
+def test_generate(
+    model, tokenizer, prompt_text: str, max_tokens: int = 200,
+    enable_thinking: bool = False,
+) -> str:
     """Simple greedy generation for testing."""
     messages = [{"role": "user", "content": prompt_text}]
-    tokens = tokenizer.apply_chat_template(
-        messages, add_generation_prompt=True, return_dict=False
-    )
+    kwargs = dict(add_generation_prompt=True, return_dict=False)
+    if not enable_thinking:
+        kwargs["enable_thinking"] = False
+    tokens = tokenizer.apply_chat_template(messages, **kwargs)
     input_ids = mx.array(tokens).reshape(1, -1)
 
     generated = []
@@ -161,7 +167,7 @@ def main():
     print(f"{'='*70}")
     for p in test_prompts:
         print(f"\n  Q: {p}")
-        response = test_generate(model, tokenizer, p, args.max_tokens)
+        response = test_generate(model, tokenizer, p, args.max_tokens, args.enable_thinking)
         print(f"  A: {response[:300]}")
         mx.clear_cache()
 
@@ -191,6 +197,7 @@ def main():
         epochs=args.epochs,
         max_seq_length=args.max_seq_length,
         report_every=args.report_every,
+        enable_thinking=args.enable_thinking,
         output_dir=args.output_dir,
     )
 
@@ -202,7 +209,7 @@ def main():
     print(f"{'='*70}")
     for p in test_prompts:
         print(f"\n  Q: {p}")
-        response = test_generate(model, tokenizer, p, args.max_tokens)
+        response = test_generate(model, tokenizer, p, args.max_tokens, args.enable_thinking)
         print(f"  A: {response[:500]}")
         mx.clear_cache()
 

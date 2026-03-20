@@ -101,6 +101,9 @@ class LorraConfig:
     report_every: int = 5
     save_every_epoch: bool = True
 
+    # Tokenization
+    enable_thinking: bool = False
+
     # Output
     output_dir: str = "outputs/lorra"
 
@@ -155,7 +158,10 @@ def train_lorra(
     tokenized: list[list[int]] = []
     for prompt in prompts:
         messages = [{"role": "user", "content": prompt}]
-        tokens = tokenizer.apply_chat_template(messages, return_dict=False)
+        kwargs = dict(return_dict=False, add_generation_prompt=True)
+        if not config.enable_thinking:
+            kwargs["enable_thinking"] = False
+        tokens = tokenizer.apply_chat_template(messages, **kwargs)
         if len(tokens) <= config.max_seq_length:
             tokenized.append(tokens)
         else:
