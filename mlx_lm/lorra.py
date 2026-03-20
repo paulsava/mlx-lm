@@ -156,6 +156,10 @@ def main():
         print(f"  A: {response[:300]}")
         mx.clear_cache()
 
+    # ── Wrap with hooks BEFORE LoRA (hook wrapper inspects raw Linear layers) ──
+    from .hooks import wrap_model_with_hooks
+    hooked_model = wrap_model_with_hooks(model)
+
     # ── Apply LoRA adapters ──────────────────────────────────────────
     print(f"\n{'='*70}")
     print("APPLYING LoRA ADAPTERS")
@@ -186,7 +190,7 @@ def main():
         output_dir=args.output_dir,
     )
 
-    adapter_path = train_lorra(model, tokenizer, prompts, lorra_config)
+    adapter_path = train_lorra(model, tokenizer, prompts, lorra_config, hooked_model=hooked_model)
 
     # ── Post-training generation test ────────────────────────────────
     print(f"\n{'='*70}")

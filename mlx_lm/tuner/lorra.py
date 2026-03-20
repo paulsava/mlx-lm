@@ -116,17 +116,19 @@ def train_lorra(
     tokenizer: Any,
     prompts: list[str],
     config: LorraConfig,
+    hooked_model: nn.Module | None = None,
 ):
     """Run LoRRA training: bake steering vector effects into LoRA weights.
 
     This is a self-contained training loop that:
-    1. Wraps the model with hooks
+    1. Uses hooked model for activation collection
     2. Pre-computes frozen hidden states for all prompts
     3. Trains LoRA adapters with representation matching loss
     4. Saves the trained adapters
 
     Args:
         model: Model with LoRA adapters already applied (frozen base + unfrozen LoRA).
+        hooked_model: Model wrapped with hooks (must be done before LoRA application).
         tokenizer: Tokenizer for encoding prompts.
         prompts: List of training prompt strings.
         config: LoRRA training configuration.
@@ -168,8 +170,11 @@ def train_lorra(
             tokenized.append(tokens[:config.max_seq_length])
     print(f"  {len(tokenized)} prompts tokenized")
 
-    # Wrap model with hooks for activation collection
-    hooked = wrap_model_with_hooks(model)
+    # Use pre-wrapped hooked model, or wrap now if not provided
+    if hooked_model is not None:
+        hooked = hooked_model
+    else:
+        hooked = wrap_model_with_hooks(model)
 
     # ── Pre-compute frozen hidden states ─────────────────────────────
     # Zero out LoRA params temporarily to get true baseline activations
