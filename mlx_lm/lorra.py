@@ -97,31 +97,16 @@ def test_generate(
     model, tokenizer, prompt_text: str, max_tokens: int = 200,
     enable_thinking: bool = False,
 ) -> str:
-    """Simple greedy generation for testing."""
+    """Generate text using mlx_lm's proper generate with KV cache."""
+    from .generate import generate as mlx_generate
+
     messages = [{"role": "user", "content": prompt_text}]
-    kwargs = dict(add_generation_prompt=True, return_dict=False)
+    kwargs = dict(add_generation_prompt=True, tokenize=False)
     if not enable_thinking:
         kwargs["enable_thinking"] = False
-    tokens = tokenizer.apply_chat_template(messages, **kwargs)
-    input_ids = mx.array(tokens).reshape(1, -1)
+    prompt = tokenizer.apply_chat_template(messages, **kwargs)
 
-    generated = []
-    for _ in range(max_tokens):
-        logits = model(input_ids)
-        next_token = mx.argmax(logits[0, -1, :])
-        mx.eval(next_token)
-        token_id = next_token.item()
-
-        if token_id in (tokenizer.eos_token_id, tokenizer.pad_token_id):
-            break
-        # Also check for common stop tokens
-        if hasattr(tokenizer, 'eos_token_id') and token_id == tokenizer.eos_token_id:
-            break
-
-        generated.append(token_id)
-        input_ids = mx.array([[token_id]])
-
-    return tokenizer.decode(generated)
+    return mlx_generate(model, tokenizer, prompt=prompt, max_tokens=max_tokens)
 
 
 def main():
