@@ -33,6 +33,11 @@ def inject_attention_hooks(
     hook_attn_out = create_hook_point("hook_attn_out")
     hook_z = create_hook_point("hook_z")
 
+    # Gemma 4 attention returns (output, shared_kv, offset) — a non-standard tuple.
+    # Detect via `is_sliding`, which is Gemma 4-specific, and fall back to super().__call__()
+    # hooking only the output component so the tuple structure is preserved.
+    _is_standard_return = not hasattr(attn_module, "is_sliding")
+
     original_class = attn_module.__class__
 
     class HookedAttention(original_class):
@@ -68,6 +73,16 @@ def inject_attention_hooks(
             # to the original forward pass and skip Q/K/V hooks for those layers.
             if not hasattr(self, "k_proj"):
                 return super().__call__(x, mask, cache, **kwargs)
+
+            # Non-standard attention (e.g. Gemma 4) returns a tuple (output, shared_kv, offset).
+            # Reimplementing the forward pass here would lose shared_kv/offset, so delegate
+            # to the original and hook only the output (first) element.
+            if not _is_standard_return:
+                result = super().__call__(x, mask, cache, **kwargs)
+                if isinstance(result, tuple):
+                    hooked = hook_z(result[0], cache=cache, mask=mask)
+                    return (hooked,) + result[1:]
+                return hook_z(result, cache=cache, mask=mask)
 
             B, L, _ = x.shape
 
