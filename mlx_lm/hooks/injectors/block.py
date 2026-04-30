@@ -43,6 +43,16 @@ def inject_block_hooks(
 
     original_class = block_module.__class__
 
+    # Detect whether this block uses the standard single-tensor return convention
+    # or a tuple return (e.g. Gemma 4 returns (h, shared_kv, offset)).
+    # We probe by checking the original __call__ annotation or falling back to
+    # a simpler pre/post-only wrapping for non-standard blocks.
+    _has_standard_mlp = (
+        hasattr(block_module, "mlp")
+        and hasattr(block_module, "post_attention_layernorm")
+        and not hasattr(block_module, "pre_feedforward_layernorm")  # Gemma 4 uses this
+    )
+
     class HookedBlock(original_class):
         def __call__(
             self,
@@ -50,25 +60,37 @@ def inject_block_hooks(
             mask: Optional[mx.array] = None,
             cache: Optional[Any] = None,
             **kwargs,
-        ) -> mx.array:
+        ):
             """Apply the block while emitting residual-stream hook activations."""
             context_kwargs = {'cache': cache, 'mask': mask}
             resid = hook_resid_pre(x, **context_kwargs)
 
-            attn_module = getattr(self, attn_attr)
-            attn_out = attn_module(
-                self.input_layernorm(resid),
-                mask,
-                cache,
-                **kwargs,
-            )
-            h = resid + attn_out
-            h = hook_resid_mid(h, **context_kwargs)
-
-            mlp_out = self.mlp(self.post_attention_layernorm(h))
-            out = h + mlp_out
-            out = hook_resid_post(out, **context_kwargs)
-            return out
+            if _has_standard_mlp:
+                # Standard transformer block: reimplement to capture resid_mid.
+                attn_module = getattr(self, attn_attr)
+                attn_out = attn_module(
+                    self.input_layernorm(resid),
+                    mask,
+                    cache,
+                    **kwargs,
+                )
+                h = resid + attn_out
+                h = hook_resid_mid(h, **context_kwargs)
+                mlp_out = self.mlp(self.post_attention_layernorm(h))
+                out = h + mlp_out
+                out = hook_resid_post(out, **context_kwargs)
+                return out
+            else:
+                # Non-standard block (e.g. Gemma 4 with MoE, per-layer gating,
+                # tuple returns). Delegate entirely to the original forward pass
+                # and hook only the input and the hidden-state component of the
+                # output.
+                result = super().__call__(resid, mask, cache, **kwargs)
+                if isinstance(result, tuple):
+                    h = hook_resid_post(result[0], **context_kwargs)
+                    return (h,) + result[1:]
+                else:
+                    return hook_resid_post(result, **context_kwargs)
 
     block_module.__class__ = HookedBlock
 
