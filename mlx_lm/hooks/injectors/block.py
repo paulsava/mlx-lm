@@ -49,6 +49,7 @@ def inject_block_hooks(
             x: mx.array,
             mask: Optional[mx.array] = None,
             cache: Optional[Any] = None,
+            **kwargs,
         ) -> mx.array:
             """Apply the block while emitting residual-stream hook activations."""
             context_kwargs = {'cache': cache, 'mask': mask}
@@ -58,7 +59,8 @@ def inject_block_hooks(
             attn_out = attn_module(
                 self.input_layernorm(resid),
                 mask,
-                cache
+                cache,
+                **kwargs,
             )
             h = resid + attn_out
             h = hook_resid_mid(h, **context_kwargs)
