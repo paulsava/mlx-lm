@@ -61,8 +61,14 @@ def inject_attention_hooks(
             x: mx.array,
             mask: Optional[mx.array] = None,
             cache: Optional[Any] = None,
+            **kwargs,
         ) -> mx.array:
             """Apply attention while emitting the configured hook activations."""
+            # KV-shared layers (e.g. Gemma 4) have no k_proj/v_proj; fall back
+            # to the original forward pass and skip Q/K/V hooks for those layers.
+            if not hasattr(self, "k_proj"):
+                return super().__call__(x, mask, cache, **kwargs)
+
             B, L, _ = x.shape
 
             # Q/K/V projections with hooks
