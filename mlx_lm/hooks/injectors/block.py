@@ -50,6 +50,7 @@ def inject_block_hooks(
     _has_standard_mlp = (
         hasattr(block_module, "mlp")
         and hasattr(block_module, "post_attention_layernorm")
+        and hasattr(block_module, "input_layernorm")  # OLMo 3 / OLMo 2 are post-norm and lack this
         and not hasattr(block_module, "pre_feedforward_layernorm")  # Gemma 4 uses this
     )
 
